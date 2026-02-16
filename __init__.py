@@ -21,8 +21,8 @@ import urllib.request
 import json
 import shutil
 import subprocess
-import os
 import argparse
+import time
 from pathlib import Path
 from fastapi import Request, Response
 from fastapi.responses import FileResponse
@@ -36,7 +36,6 @@ REPO_NAME = "sleepy-frontend"
 ASSET_NAME = "dist.zip"
 SRC_ZIP_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/archive/refs/heads/main.zip"
 
-
 class Plugin(PluginBase):
     """
     Frontend Plugin with Smart Build/Download Logic
@@ -48,6 +47,10 @@ class Plugin(PluginBase):
         self.plugin_dir = Path(__file__).parent.resolve()
         self.dist_path = self.plugin_dir / "dist"
         self.src_path = self.plugin_dir / "frontend-src"
+        self.mirror_list_path = self.plugin_dir / "mirrorlist.json"
+        
+        # Determine best mirror at startup
+        self.best_mirror = self._get_best_mirror()
 
         self.add_cli_command(
             command="sync",
@@ -88,6 +91,56 @@ class Plugin(PluginBase):
         except Exception as e:
             l.error(f"Sync failed: {e}")
 
+    def _get_best_mirror(self) -> str:
+        """Reads mirrorlist.json and includes the hardcoded reverse proxy."""
+        allinone_mirror = "https://reverse.krnl64.win"
+        
+        mirrors = [allinone_mirror]
+
+        if self.mirror_list_path.exists():
+            try:
+                with open(self.mirror_list_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                mirrors.extend(config.get("data", {}).get("fileMirrors", []))
+            except Exception as e:
+                l.error(f"Failed to read mirrorlist.json: {e}")
+
+        l.info(f"Testing {len(mirrors)} mirrors for best latency...")
+        best_url = ""
+        min_latency = float('inf')
+
+        # Test mirrors to find the fastest one
+        for url in mirrors[:15]: 
+            try:
+                start = time.time()
+                # Use a small timeout to skip dead mirrors quickly
+                req = urllib.request.Request(url, method='HEAD')
+                with urllib.request.urlopen(req, timeout=2.0):
+                    latency = time.time() - start
+                    if latency < min_latency:
+                        min_latency = latency
+                        best_url = url
+            except Exception:
+                continue
+
+        return best_url or ""
+
+    def _get_mirrored_url(self, original_url: str) -> str:
+        """
+        Wraps the URL based on mirror type.
+        """
+        if not self.best_mirror:
+            return original_url
+        
+        mirror = self.best_mirror.rstrip('/')
+        
+        if "reverse.krnl64.win" in mirror:
+            return f"{mirror}/{original_url}"
+        
+        # Standard GH Proxy format (Mirror + Original URL)
+        return f"{mirror}/{original_url}"
+    
+
     def _ensure_frontend_ready(self):
         """
         初始化逻辑：
@@ -127,20 +180,17 @@ class Plugin(PluginBase):
         return shutil.which("pnpm") is not None
 
     def _download_and_extract_source(self):
-        """下载 main.zip 并解压到 frontend-src"""
-        l.info(f"Downloading source from {SRC_ZIP_URL}...")
+        """Download mirrored main.zip and extract."""
+        mirrored_url = self._get_mirrored_url(SRC_ZIP_URL)
+        l.info(f"Downloading source from: {mirrored_url}")
 
         # 清理旧源码
         if self.src_path.exists():
             shutil.rmtree(self.src_path)
 
         zip_path = self.plugin_dir / "source.zip"
-
         try:
-            # 下载
-            self._download_file(SRC_ZIP_URL, zip_path)
-
-            # 解压
+            self._download_file(mirrored_url, zip_path)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 root_folder = zip_ref.namelist()[0].split('/')[0]
                 zip_ref.extractall(self.plugin_dir)
@@ -216,10 +266,11 @@ class Plugin(PluginBase):
             if self.dist_path.exists():
                 shutil.rmtree(self.dist_path)
 
-            download_url = self._get_latest_download_url()
-            l.info(f"Downloading pre-built dist from: {download_url}")
+            raw_url = self._get_latest_download_url()
+            mirrored_url = self._get_mirrored_url(raw_url)
+            l.info(f"Downloading pre-built dist from: {mirrored_url}")
 
-            self._download_file(download_url, zip_path)
+            self._download_file(mirrored_url, zip_path)
 
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(self.plugin_dir)
