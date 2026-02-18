@@ -48,9 +48,9 @@ class Plugin(PluginBase):
         self.dist_path = self.plugin_dir / "dist"
         self.src_path = self.plugin_dir / "frontend-src"
         self.mirror_list_path = self.plugin_dir / "mirrorlist.json"
-        
-        # Determine best mirror at startup
-        self.best_mirror = self._get_best_mirror()
+
+        # Lazily determined on first download
+        self.best_mirror: str | None = None
 
         self.add_cli_command(
             command="sync",
@@ -129,6 +129,9 @@ class Plugin(PluginBase):
         """
         Wraps the URL based on mirror type.
         """
+        if self.best_mirror is None:
+            self.best_mirror = self._get_best_mirror()
+
         if not self.best_mirror:
             return original_url
         
